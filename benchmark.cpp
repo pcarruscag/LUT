@@ -65,6 +65,8 @@ int main() {
   // Build the map.
   auto t_build = -omp_get_wtime();
 
+  ReorderPoints<IntT>(tris, x, y);
+
   Matrix2i edge_pts, edge_faces;
   ExtractEdges<IntT>(tris, edge_pts, edge_faces);
 
@@ -72,8 +74,8 @@ int main() {
   BuildTrapezoidalMap<IntT>(edge_pts, x, y, map);
 
   t_build += omp_get_wtime();
-  std::cout << "Built map in " << t_build << "s\n";
-  std::cout << "  " << edge_pts.rows() << " edges and "
+  std::cout << "Built map in " << t_build << "s\n"
+            << "  " << edge_pts.rows() << " edges and "
             << map.x_bands.size() - 1 << " bands\n";
 
   // Manufacture a function.
