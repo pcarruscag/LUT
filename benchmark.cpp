@@ -63,20 +63,24 @@ int main() {
   f.close();
 
   // Build the map.
-  auto t_build = -omp_get_wtime();
+  const auto t0 = omp_get_wtime();
 
   ReorderPoints<IntT>(tris, x, y);
+  const auto t_order = omp_get_wtime();
 
   Matrix2i edge_pts, edge_faces;
   ExtractEdges<IntT>(tris, edge_pts, edge_faces);
+  const auto t_edges = omp_get_wtime();
 
   TrapezoidalMap<VectorInt, VectorReal> map;
   BuildTrapezoidalMap<IntT>(edge_pts, x, y, map);
+  const auto t_build = omp_get_wtime();
 
-  t_build += omp_get_wtime();
-  std::cout << "Built map in " << t_build << "s\n"
+  std::cout << "Built map in " << (t_build - t0) << "s\n"
             << "  " << edge_pts.rows() << " edges and "
-            << map.x_bands.size() - 1 << " bands\n";
+            << map.x_bands.size() - 1 << " bands\n"
+            << "  Reorder in " << (t_order - t0) << "s\n"
+            << "  Extract edges in " << (t_edges - t_order) << "s\n";
 
   // Manufacture a function.
   auto func = [](const auto x, const auto y) {

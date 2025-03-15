@@ -8,7 +8,9 @@
 
 template <typename Vector> struct ScalarType;
 
-template <typename T> struct ScalarType<std::vector<T>> { using type = T; };
+template <typename T> struct ScalarType<std::vector<T>> {
+  using type = T;
+};
 
 template <typename Vector>
 using ScalarTypeT = typename ScalarType<Vector>::type;
@@ -20,6 +22,40 @@ template <typename VectorInt, typename VectorReal> struct TrapezoidalMap {
   VectorInt offsets, edge_id;
   VectorReal x_bands, edge_y;
 };
+
+/// Orders points in order of ascending x coordinates and updates the definition
+/// of triangles.
+template <typename Int, typename Matrix3, typename VectorReal>
+void ReorderPoints(Matrix3 &triangles, VectorReal &x, VectorReal &y) {
+  const auto n_pts = static_cast<Int>(x.size());
+
+  // Sort order of x values.
+  std::vector<Int> perm(n_pts);
+  std::iota(perm.begin(), perm.end(), 0);
+  std::sort(perm.begin(), perm.end(), [&x, &y](const auto i, const auto j) {
+    return x[i] != x[j] ? x[i] < x[j] : y[i] < y[j];
+  });
+
+  auto reorder = [n_pts, &perm](const auto &v) {
+    VectorReal tmp(n_pts);
+    for (Int i = 0; i < n_pts; ++i) {
+      tmp[i] = v[perm[i]];
+    }
+    return tmp;
+  };
+  x = reorder(x);
+  y = reorder(y);
+
+  std::vector<Int> inv_perm(n_pts);
+  for (Int i = 0; i < n_pts; ++i) {
+    inv_perm[perm[i]] = i;
+  }
+  for (Int i = 0; i < static_cast<Int>(triangles.rows()); ++i) {
+    for (Int j = 0; j < 3; ++j) {
+      triangles(i, j) = inv_perm[triangles(i, j)];
+    }
+  }
+}
 
 /// Extracts unique edges from a set of triangles, edges are defined by two
 /// point IDs and can be shared by up to two faces (triangles), boundary edges
@@ -75,33 +111,23 @@ void ExtractEdges(const Matrix3 &triangles, Matrix2 &edge_pts,
 /// (unique x values - 1). Returns the number of bands, their limits,
 /// and a map from point ID to band ID.
 template <typename Int, typename Vector> auto DetectBands(const Vector &x) {
-  // Sort order of x values.
-  std::vector<Int> perm(x.size());
-  std::iota(perm.begin(), perm.end(), 0);
-  std::sort(perm.begin(), perm.end(),
-            [&x](const auto i, const auto j) { return x[i] < x[j]; });
   // Since there could be duplicate x values, the number of bands is not n-1.
-  std::vector<Int> band(perm.size());
+  std::vector<Int> band(x.size());
   band[0] = 0;
   Int n_bands = 0;
-  for (Int i = 1; i < static_cast<Int>(perm.size()); ++i) {
-    n_bands += static_cast<Int>(x[perm[i]] != x[perm[i - 1]]);
+  for (Int i = 1; i < static_cast<Int>(x.size()); ++i) {
+    n_bands += static_cast<Int>(x[i] != x[i - 1]);
     band[i] = n_bands;
   }
   Vector x_bands(n_bands + 1);
   Int pos = 0;
-  x_bands[pos] = x[perm[0]];
-  for (Int i = 1; i < static_cast<Int>(perm.size()); ++i) {
-    if (x[perm[i]] != x_bands[pos]) {
-      x_bands[++pos] = x[perm[i]];
+  x_bands[pos] = x[0];
+  for (Int i = 1; i < static_cast<Int>(x.size()); ++i) {
+    if (x[i] != x_bands[pos]) {
+      x_bands[++pos] = x[i];
     }
   }
-  // The inverse permutation maps point indices to the band index.
-  std::vector<Int> pt_to_band(perm.size());
-  for (Int i = 0; i < static_cast<Int>(perm.size()); ++i) {
-    pt_to_band[perm[i]] = band[i];
-  }
-  return std::make_tuple(n_bands, std::move(pt_to_band), std::move(x_bands));
+  return std::make_tuple(n_bands, std::move(band), std::move(x_bands));
 }
 
 /// Builds a trapezoidal map for a set of edges.

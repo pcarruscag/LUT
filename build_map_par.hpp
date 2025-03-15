@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <array>
 #include <execution>
-#include <iostream>
 #include <iterator>
 #include <numeric>
 #include <omp.h>
@@ -160,10 +159,6 @@ template <typename Int, typename Vector> auto DetectBands(const Vector &x) {
   // Do not add 1 despite band[0] == 0 because the number of bands is the
   // number of unique x values minus 1.
   const auto n_bands = band.back();
-
-  // The inverse permutation maps point indices (including duplicates) to the
-  // band index.
-  std::vector<Int> pt_to_band(x.size());
   Vector x_bands(n_bands + 1);
 
 #pragma omp parallel for
@@ -172,9 +167,8 @@ template <typename Int, typename Vector> auto DetectBands(const Vector &x) {
     if (i == 0 || pos != band[i - 1]) {
       x_bands[pos] = x[i];
     }
-    pt_to_band[i] = pos;
   }
-  return std::make_tuple(n_bands, std::move(pt_to_band), std::move(x_bands));
+  return std::make_tuple(n_bands, std::move(band), std::move(x_bands));
 }
 
 /// Builds a trapezoidal map for a set of edges.
@@ -195,20 +189,50 @@ void BuildTrapezoidalMap(const Matrix2 &edge_pts, const VectorReal &x,
   auto &counts = offsets;
   counts.clear();
   counts.resize(n_bands + 1, 0);
-#pragma omp parallel for
-  for (Int i = 0; i < static_cast<Int>(edge_pts.rows()); ++i) {
-    const auto band_0 = pt_to_band[edge_pts(i, 0)];
-    const auto band_1 = pt_to_band[edge_pts(i, 1)];
-    for (auto j = std::min(band_0, band_1); j < std::max(band_0, band_1); ++j) {
+
+  // Threads will process a non overlapping range of bands. That requires each
+  // thread to work on overlapping ranges of edges. These are determined while
+  // counting the edges. The overlap is small due to the sorting of points and
+  // edges.
+  const auto n_threads = omp_get_max_threads();
+  const auto bands_per_thread = (n_bands + n_threads - 1) / n_threads;
+
+  auto thread_for_band = [bands_per_thread](const auto band) {
+    return band / bands_per_thread;
+  };
+  const auto n_edges = static_cast<Int>(edge_pts.rows());
+  std::vector<Int> edge_begin(n_threads, n_edges), edge_end(n_threads, 0);
+
+#pragma omp parallel
+  {
+    // t_ for thread local.
+    std::vector<Int> t_edge_begin(n_threads, n_edges), t_edge_end(n_threads, 0);
+#pragma omp for
+    for (Int i = 0; i < n_edges; ++i) {
+      const auto band_0 = pt_to_band[edge_pts(i, 0)];
+      const auto band_1 = pt_to_band[edge_pts(i, 1)];
+      for (auto j = std::min(band_0, band_1); j < std::max(band_0, band_1);
+           ++j) {
+        const auto t = thread_for_band(j);
+        t_edge_begin[t] = std::min(t_edge_begin[t], i);
+        t_edge_end[t] = std::max(t_edge_end[t], i);
 #pragma omp atomic
-      ++counts[j + 1];
+        ++counts[j + 1];
+      }
+    }
+    // Global reduction.
+#pragma omp critical
+    for (int t = 0; t < n_threads; ++t) {
+      edge_begin[t] = std::min(edge_begin[t], t_edge_begin[t]);
+      edge_end[t] = std::max(edge_end[t], t_edge_end[t]);
     }
   }
+  edge_begin.front() = 0;
+  edge_end.back() = n_edges - 1;
+
   // Convert the counts to offsets.
   std::inclusive_scan(std::execution::par, offsets.begin(), offsets.end(),
                       offsets.begin());
-
-  auto t2 = -omp_get_wtime();
 
   // For each band store the edge ids that cross it, and the mid-point y
   // coordinate of the segment.
@@ -217,17 +241,15 @@ void BuildTrapezoidalMap(const Matrix2 &edge_pts, const VectorReal &x,
   auto pos = offsets;
 #pragma omp parallel
   {
-    // const auto thread = omp_get_thread_num();
-    // const auto bands_per_thread =
-    //     (n_bands + omp_get_num_threads() - 1) / omp_get_num_threads();
-    // const auto band_begin = thread * bands_per_thread;
-    // const auto band_end = std::min(band_begin + bands_per_thread, n_bands);
+    // Since the ranges overlap, some bands need to be skipped.
+    const auto t = omp_get_thread_num();
+    const auto band_begin = t * bands_per_thread;
+    const auto band_end = (t + 1) * bands_per_thread;
 
-    // auto process_band = [&](const auto band) {
-    //   return band >= band_begin && band < band_end;
-    // };
-#pragma omp for
-    for (Int i_edge = 0; i_edge < static_cast<Int>(edge_pts.rows()); ++i_edge) {
+    auto process_band = [band_begin, band_end](const auto band) {
+      return band >= band_begin && band < band_end;
+    };
+    for (auto i_edge = edge_begin[t]; i_edge <= edge_end[t]; ++i_edge) {
       const auto pt_0 = edge_pts(i_edge, 0);
       const auto pt_1 = edge_pts(i_edge, 1);
       const auto band_0 = pt_to_band[pt_0];
@@ -240,11 +262,12 @@ void BuildTrapezoidalMap(const Matrix2 &edge_pts, const VectorReal &x,
       const auto dy_dx = (y[pt_1] - y_0) / (x[pt_1] - x_0);
       for (auto j = std::min(band_0, band_1); j < std::max(band_0, band_1);
            ++j) {
-        // if (!process_band(j))
-        //   continue;
-        Int pj{};
-#pragma omp atomic capture
-        pj = pos[j]++;
+        if (!process_band(j))
+          continue;
+        // An alternative to partitioning the bands is to use an atomic capture
+        // here. However, that has higher overhead (especially relative to the
+        // sequential version) and is less scalable.
+        const auto pj = pos[j]++;
         edge_id[pj] = i_edge;
         const auto x_mid = (x_bands[j] + x_bands[j + 1]) / 2;
         edge_y[pj] = y_0 + dy_dx * (x_mid - x_0);
@@ -252,11 +275,6 @@ void BuildTrapezoidalMap(const Matrix2 &edge_pts, const VectorReal &x,
     }
   }
   decltype(pos)().swap(pos);
-
-  t2 += omp_get_wtime();
-  std::cout << t2 << std::endl;
-
-  auto t3 = -omp_get_wtime();
 
   // Sort the edges in each band by y coordinate.
 #pragma omp parallel
@@ -278,7 +296,4 @@ void BuildTrapezoidalMap(const Matrix2 &edge_pts, const VectorReal &x,
       }
     }
   }
-
-  t3 += omp_get_wtime();
-  std::cout << t3 << std::endl;
 }
